@@ -102,7 +102,8 @@ class HMM(object):
             robust_autoregressive=obs.RobustAutoRegressiveObservations,
             diagonal_robust_ar=obs.RobustAutoRegressiveDiagonalNoiseObservations,
             diagonal_robust_autoregressive=obs.RobustAutoRegressiveDiagonalNoiseObservations,
-            input_driven_obs_gaussian=obs.InputDrivenGaussianObservations
+            input_driven_obs_gaussian=obs.InputDrivenGaussianObservations,
+            input_driven_obs_diagonal_gaussian=obs.InputDrivenDiagonalGaussianObservations
             )
 
         if isinstance(observations, str):
@@ -200,12 +201,14 @@ class HMM(object):
         if input is not None:
             assert input.shape == (T,) + M
 
-## MODIFIED THIS LINE BELOW TO INCLUDE NEW CLASS "InputDrivenGaussianObservations"
+## MODIFIED THIS LINE BELOW TO INCLUDE NEW CLASS "InputDrivenGaussianObservations" & "InputDrivenDiagonalGaussianObservations"
             
         # Get the type of the observations
         if isinstance(self.observations, obs.InputDrivenObservations):
             dtype = int
         elif isinstance(self.observations, obs.InputDrivenGaussianObservations):
+            dtype =  float        
+        elif isinstance(self.observations, obs.InputDrivenDiagonalGaussianObservations):
             dtype =  float
         else:
             dummy_data = self.observations.sample_x(0, np.empty(0, ) + D)
