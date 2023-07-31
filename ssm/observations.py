@@ -867,7 +867,7 @@ class InputDrivenDiagonalGaussianObservations(Observations):
         @param prior_sigma: parameter governing strength of prior. Prior on GLM weights is multivariate
         normal distribution with mean 'prior_mean' and diagonal covariance matrix (prior_sigma is on diagonal)
         """
-        super(InputDrivenGaussianObservations, self).__init__(K, D, M)
+        super(InputDrivenDiagonalGaussianObservations, self).__init__(K, D, M)
 #         self.C = C
         self.M = M
         self.D = D
