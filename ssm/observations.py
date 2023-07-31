@@ -985,7 +985,7 @@ class InputDrivenDiagonalGaussianObservations(Observations):
         #return np.column_stack([stats.multivariate_normal_logpdf(data-time_input, mu, Sigma) for mu, Sigma, time_input in zip(mus, Sigmas, time_dependent_input)])
 
         # NOTE SURE ABOUT THIS LINE
-        return stats.diagonal_gaussian_logpdf(data[:, None, :]-time_dependent_input[:, None, :], mus, sigmas, mask=mask[:, self.K, :])
+        return stats.diagonal_gaussian_logpdf(data[:, None, :]-time_dependent_input, mus, sigmas, mask=None)
 
     def sample_x(self, z, xhist, input, tag=None, with_noise=True):
                                # z is an T-dim array of state indices
