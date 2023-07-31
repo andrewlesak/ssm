@@ -856,6 +856,167 @@ class InputDrivenGaussianObservations(Observations):
 # END NEW CLASS
 
 
+# NEW CLASS FOR DIAGONAL GAUSSIAN GLM
+
+class InputDrivenDiagonalGaussianObservations(Observations):
+
+    def __init__(self, K, D, M=0, prior_mean = 0, prior_sigma=1000):
+        """
+        @param K: number of states
+        @param D: dimensionality of output
+        @param prior_sigma: parameter governing strength of prior. Prior on GLM weights is multivariate
+        normal distribution with mean 'prior_mean' and diagonal covariance matrix (prior_sigma is on diagonal)
+        """
+        super(InputDrivenGaussianObservations, self).__init__(K, D, M)
+#         self.C = C
+        self.M = M
+        self.D = D
+        self.K = K
+        self.prior_mean = prior_mean
+        self.prior_sigma = prior_sigma
+        self.mus = npr.randn(K, D)
+        #self._sqrt_Sigmas = npr.randn(K, D, D)
+        self._log_sigmasq = -2 + npr.randn(K, D)
+
+        # Parameters linking input to distribution over output classes
+        self.Wks = npr.randn(K, D, M)
+
+    # ALLOW TO SET THE PARAMETERS BY HAND - this part is adapted from the AutoregressiveGaussian obs
+    
+    
+    @property
+    def Wk(self):
+        return self.Wks[0]
+
+    @Wk.setter
+    def Wk(self, value):
+        assert value.shape == self.Wks[0].shape
+        self.Wks[0] = value
+
+    @property
+    def mu(self):
+        return self.mus[0]
+
+    @mu.setter
+    def mu(self, value):
+        assert value.shape == self.mus[0].shape
+        self.mus[0] = value
+    
+    #@property
+    #def Sigmas(self):
+    #    return np.matmul(self._sqrt_Sigmas, np.swapaxes(self._sqrt_Sigmas, -1, -2))
+
+    #@Sigmas.setter
+    #def Sigmas(self, value):
+    #    assert value.shape == (self.K, self.D, self.D)
+    #    self._sqrt_Sigmas = np.linalg.cholesky(value + 1e-8 * np.eye(self.D))
+
+    @property
+    def sigmasq(self):
+        return np.exp(self._log_sigmasq)
+
+    @sigmasq.setter
+    def sigmasq(self, value):
+        assert np.all(value > 0) and value.shape == (self.K, self.D)
+        self._log_sigmasq = np.log(value)
+    
+    @property
+    def params(self):
+        #return self.Wks, self.mus, self._sqrt_Sigmas
+        return self.Wks, self.mus, self._log_sigmasq
+
+    @params.setter
+    def params(self, value):
+        #self.Wks, self.mus, self._sqrt_Sigmas = value
+        self.Wks, self.mus, self._log_sigmasq = value
+        
+    def permute(self, perm):
+        self.Wks = self.Wks[perm]
+        self.mus = self.mus[perm]
+        #self._sqrt_Sigmas = self._sqrt_Sigmas[perm]
+        self._log_sigmasq = self._log_sigmasq[perm]
+        
+    def log_prior(self):
+        lp = 0
+        for k in range(self.K):
+#             for c in range(self.C - 1):
+#                 weights = self.Wk[k][c]
+            for c in range(self.D):
+                weights = self.Wks[k][c]
+                lp += stats.multivariate_normal_logpdf(weights,mus=np.repeat(self.prior_mean, (self.M)),Sigmas=((self.prior_sigma) ** 2) * np.identity(self.M))
+        return lp
+
+    # Calculate time dependent log prob - output is matrix of size TxKxD
+    # Input is size TxM
+    def calculate_input(self, input):
+        """
+        Return array of size TxKxD containing log(pr(yt|zt=k))
+        :param input: input array of covariates of size TxM
+        :return: array of size TxKxD containing log(pr(yt|zt=k, ut)) for all c in {1, ..., D} and k in {1, ..., K}
+        """
+        ## REWRITE TO KEEP TIME AS FIRST DIMENSION!
+        Wk=self.Wks
+        time_dependent_input =np.transpose(np.dot(Wk, input.T), (2, 0, 1)) # dim TxKxD
+        #Note: this has an unexpected effect when both input (and thus Wk) are empty arrays and returns an array of zeros
+        return time_dependent_input
+    
+    
+    # log_likelihoods for diagonal gaussian
+    def log_likelihoods(self, data, input, mask, tag):
+        #mus, Sigmas = self.mus, self.Sigmas # dimensions: (K,D), (K,D,D)
+        mus, sigmas = self.mus, np.exp(self._log_sigmasq) + 1e-16 # dimensions: (K,D), (K,D)
+
+        if input.ndim == 1 and input.shape == (self.M,): # if input is vector of size self.M (one time point), expand dims to be (1, M)
+            input = np.expand_dims(input, axis=0)
+        time_dependent_input = self.calculate_input(input) # dimensions: TxKxD
+        # data: dimensions (T,D)
+        mask = np.ones_like(data, dtype=bool) if mask is None else mask
+        
+        #if mask is not None and np.any(~mask) and not isinstance(mus, np.ndarray):
+        #    raise Exception("Current implementation of multivariate_normal_logpdf for masked data"
+        #                    "does not work with autograd because it writes to an array. "
+        #                    "Use DiagonalGaussian instead if you need to support missing data.")
+        # stats.multivariate_normal_logpdf supports broadcasting, but we get
+        # significant performance benefit if we call it with (TxD), (D,), and (D,D)
+        # arrays as inputs
+        # data shape is TxD
+        
+        #time_dependent_input=np.transpose(time_dependent_input,(1,0,2)) # transpose this to dim KxTxD to match with data and use it in zip 
+        #return np.column_stack([stats.multivariate_normal_logpdf(data-time_input, mu, Sigma) for mu, Sigma, time_input in zip(mus, Sigmas, time_dependent_input)])
+
+        # NOTE SURE ABOUT THIS LINE
+        return stats.diagonal_gaussian_logpdf(data[:, None, :]-time_dependent_input, mus, sigmas, mask=mask[:, None, :])
+
+    def sample_x(self, z, xhist, input, tag=None, with_noise=True):
+                               # z is an T-dim array of state indices
+        D, mus = self.D, self.mus
+        if input.ndim == 1 and input.shape == (self.M,): # if input is vector of size self.M (one time point), expand dims to be (1, M)
+            input = np.expand_dims(input, axis=0)
+        time_dependent_input = self.calculate_input(input)  # size TxKxD
+        # LINE BELOW: the last dimension in time_dependent_input is the time; 
+        # when running "# fit the data array" in hmm.py, it picks only input[0] 
+        T = time_dependent_input.shape[0]
+        
+        #sqrt_Sigmas = self._sqrt_Sigmas if with_noise else np.zeros((self.K, self.D, self.D))  
+        sigmas = np.exp(self._log_sigmasq) if with_noise else np.zeros((self.K, self.D))
+        if T == 1:
+            sample = np.array([mus[z] + time_dependent_input[t,z,:] + np.sqrt(sigmas[z]) * npr.randn(D) for t in range(T)])
+        elif T > 1:
+            sample = np.array([mus[z[t]] + time_dependent_input[t,z[t],:] + np.sqrt(sigmas[z[t]]) * npr.randn(D) for t in range(T)])                               
+        return sample    
+    
+    def m_step(self, expectations, datas, inputs, masks, tags, optimizer = "bfgs", **kwargs):
+        Observations.m_step(self, expectations, datas, inputs, masks, tags, optimizer, **kwargs)
+
+    def smooth(self, expectations, data, input, tag):
+        """
+        Compute the mean observation under the posterior distribution
+        of latent discrete states.
+        """
+        raise NotImplementedError
+        
+# END NEW CLASS
+
 
 
 class _AutoRegressiveObservationsBase(Observations):
