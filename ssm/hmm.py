@@ -103,7 +103,9 @@ class HMM(object):
             diagonal_robust_ar=obs.RobustAutoRegressiveDiagonalNoiseObservations,
             diagonal_robust_autoregressive=obs.RobustAutoRegressiveDiagonalNoiseObservations,
             input_driven_obs_gaussian=obs.InputDrivenGaussianObservations,
-            input_driven_obs_diagonal_gaussian=obs.InputDrivenDiagonalGaussianObservations
+            input_driven_obs_diagonal_gaussian=obs.InputDrivenDiagonalGaussianObservations,
+            constrained_input_driven_obs_diagonal_gaussian=obs.InputDrivenDiagonalGaussianObservations_SingleMuSigPerState,
+            constrained_symm_input_driven_obs_diagonal_gaussian=obs.InputDrivenDiagonalGaussianObservations_SingleMuSigPerStateSymmWeights
             )
 
         if isinstance(observations, str):
@@ -141,13 +143,14 @@ class HMM(object):
         self.observations.params = value[2]
 
     @ensure_args_are_lists
-    def initialize(self, datas, inputs=None, masks=None, tags=None, init_method="random"):
+    def initialize(self, datas, init_state_mstep_kwargs, transitions_mstep_kwargs, observations_mstep_kwargs, 
+                   inputs=None, masks=None, tags=None, init_method="random", **kwargs):
         """
         Initialize parameters given data.
         """
-        self.init_state_distn.initialize(datas, inputs=inputs, masks=masks, tags=tags)
-        self.transitions.initialize(datas, inputs=inputs, masks=masks, tags=tags)
-        self.observations.initialize(datas, inputs=inputs, masks=masks, tags=tags, init_method=init_method)
+        self.init_state_distn.initialize(datas, inputs=inputs, masks=masks, tags=tags, **init_state_mstep_kwargs)
+        self.transitions.initialize(datas, inputs=inputs, masks=masks, tags=tags, **transitions_mstep_kwargs)
+        self.observations.initialize(datas, inputs=inputs, masks=masks, tags=tags, init_method=init_method, **observations_mstep_kwargs)
 
     def permute(self, perm):
         """
@@ -437,11 +440,8 @@ class HMM(object):
 
         return lls
 
-    def _fit_em(self, datas, inputs, masks, tags, verbose = 2, num_iters=100, tolerance=0,
-                init_state_mstep_kwargs={},
-                transitions_mstep_kwargs={},
-                observations_mstep_kwargs={},
-                **kwargs):
+    def _fit_em(self, datas, inputs, masks, tags, init_state_mstep_kwargs, transitions_mstep_kwargs, 
+                observations_mstep_kwargs, verbose = 2, num_iters=100, tolerance=0, **kwargs):
         """
         Fit the parameters with expectation maximization.
 
@@ -482,6 +482,9 @@ class HMM(object):
             verbose=2, method="em",
             initialize=True,
             init_method="random",
+            init_state_mstep_kwargs={},
+            transitions_mstep_kwargs={},
+            observations_mstep_kwargs={},
             **kwargs):
 
         _fitting_methods = \
@@ -501,7 +504,11 @@ class HMM(object):
                             inputs=inputs,
                             masks=masks,
                             tags=tags,
-                            init_method=init_method)
+                            init_method=init_method,
+                            init_state_mstep_kwargs=init_state_mstep_kwargs,
+                            transitions_mstep_kwargs=transitions_mstep_kwargs,
+                            observations_mstep_kwargs=observations_mstep_kwargs,
+                            **kwargs)
 
         if isinstance(self.transitions,
                       trans.ConstrainedStationaryTransitions):
@@ -514,6 +521,9 @@ class HMM(object):
                                         masks=masks,
                                         tags=tags,
                                         verbose=verbose,
+                                        init_state_mstep_kwargs=init_state_mstep_kwargs,
+                                        transitions_mstep_kwargs=transitions_mstep_kwargs,
+                                        observations_mstep_kwargs=observations_mstep_kwargs,
                                         **kwargs)
 
 
