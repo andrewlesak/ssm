@@ -206,6 +206,36 @@ def hmm_expected_states(pi0, Ps, ll):
     return expected_states, expected_joints, normalizer
 
 
+def hmm_expected_states_full_joints(pi0, Ps, ll):
+    T, K = ll.shape
+
+    alphas = np.zeros((T, K))
+    forward_pass(pi0, Ps, ll, alphas)
+    normalizer = logsumexp(alphas[-1])
+
+    betas = np.zeros((T, K))
+    backward_pass(Ps, ll, betas)
+
+    # Compute E[z_t] for t = 1, ..., T
+    expected_states = alphas + betas
+    expected_states -= scsp.logsumexp(expected_states, axis=1, keepdims=True)
+    expected_states = np.exp(expected_states)
+
+    # Compute the log transition matrices.
+    # Suppress log(0) warnings as they are expected.
+    with np.errstate(divide="ignore"):
+        log_Ps = np.log(Ps)
+
+    # Compute E[z_t, z_{t+1}] for t = 1, ..., T-1
+    # Note that this is an array of size T*K*K, which can be quite large.
+    expected_joints = alphas[:-1,:,None] + betas[1:,None,:] + ll[1:,None,:] + log_Ps
+    expected_joints -= expected_joints.max((1,2))[:,None, None]
+    expected_joints = np.exp(expected_joints)
+    expected_joints /= expected_joints.sum((1,2))[:,None,None]
+
+    return expected_states, expected_joints, normalizer
+
+
 @numba.jit(nopython=True, cache=True)
 def backward_sample(Ps, log_likes, alphas, us, zs):
     T = log_likes.shape[0]
