@@ -7,7 +7,7 @@ from autograd import value_and_grad
 
 from ssm.optimizers import adam_step, rmsprop_step, sgd_step, convex_combination
 from ssm.primitives import hmm_normalizer
-from ssm.messages import hmm_expected_states, hmm_filter, hmm_sample, viterbi
+from ssm.messages import hmm_expected_states, hmm_expected_states_full_joints, hmm_filter, hmm_sample, viterbi
 from ssm.util import ensure_args_are_lists, ensure_args_not_none, \
     ensure_slds_args_not_none, ensure_variational_args_are_lists, \
     replicate, collapse, ssm_pbar
@@ -81,6 +81,10 @@ class HMM(object):
         observation_classes = dict(
             gaussian=obs.GaussianObservations,
             diagonal_gaussian=obs.DiagonalGaussianObservations,
+            diagonal_gaussian_optimizer=obs.DiagonalGaussianObservations_Optimizer,
+            diagonal_gaussian_one_sig_per_state=obs.DiagonalGaussianObservations_OneSigPerState,
+            diagonal_gaussian_one_sig_per_state_optimizer=obs.DiagonalGaussianObservations_OneSigPerState_Optimizer,
+            spherical_gaussian_tied_cov=obs.SphericalGaussianObservations_TiedCovariance,
             studentst=obs.MultivariateStudentsTObservations,
             t=obs.MultivariateStudentsTObservations,
             diagonal_t=obs.StudentsTObservations,
@@ -103,9 +107,10 @@ class HMM(object):
             diagonal_robust_ar=obs.RobustAutoRegressiveDiagonalNoiseObservations,
             diagonal_robust_autoregressive=obs.RobustAutoRegressiveDiagonalNoiseObservations,
             input_driven_obs_gaussian=obs.InputDrivenGaussianObservations,
+            input_driven_obs_gaussian_closed_form=obs.InputDrivenGaussianObservationsClosedForm,
             input_driven_obs_diagonal_gaussian=obs.InputDrivenDiagonalGaussianObservations,
-            constrained_input_driven_obs_diagonal_gaussian=obs.InputDrivenDiagonalGaussianObservations_SingleMuSigPerState,
-            constrained_symm_input_driven_obs_diagonal_gaussian=obs.InputDrivenDiagonalGaussianObservations_SingleMuSigPerStateSymmWeights
+            input_driven_tied_spherical_gaussian_obs_const_bias=obs.InputDrivenTiedSphericalGaussianObservations_ConstantMus,
+            input_driven_tied_spherical_gaussian_obs_const_bias_symm_weights=obs.InputDrivenTiedSphericalGaussianObservations_ConstantMusSymmetricWeights,
             )
 
         if isinstance(observations, str):
@@ -113,7 +118,7 @@ class HMM(object):
             if observations not in observation_classes:
                 raise Exception("Invalid observation model: {}. Must be one of {}".
                     format(observations, list(observation_classes.keys())))
-
+            
             observation_kwargs = observation_kwargs or {}
             observations = \
                 hier.HierarchicalObservations(observation_classes[observations], K, D, M=M,
@@ -121,9 +126,19 @@ class HMM(object):
                                         **observation_kwargs) \
                 if hierarchical_observation_tags is not None \
                 else observation_classes[observations](K, D, M=M, **observation_kwargs)
-        if not isinstance(observations, obs.Observations):
-            raise TypeError("'observations' must be a subclass of"
-                            " ssm.observations.Observations")
+
+        if hierarchical_observation_tags is not None:
+            if not isinstance(observations.parent, obs.Observations):
+                raise TypeError("'parent observations' must be a subclass of"
+                                " ssm.observations.Observations")
+            for tag in hierarchical_observation_tags:
+                if not isinstance(observations.children[tag], obs.Observations):
+                    raise TypeError("'child observations' must be a subclass of"
+                                    " ssm.observations.Observations")
+        else:
+            if not isinstance(observations, obs.Observations):
+                raise TypeError("'observations' must be a subclass of"
+                                " ssm.observations.Observations")
 
         self.K, self.D, self.M = K, D, M
         self.init_state_distn = init_state_distn
@@ -150,7 +165,11 @@ class HMM(object):
         """
         self.init_state_distn.initialize(datas, inputs=inputs, masks=masks, tags=tags, **init_state_mstep_kwargs)
         self.transitions.initialize(datas, inputs=inputs, masks=masks, tags=tags, **transitions_mstep_kwargs)
+        
+        # if self.hierarchal obs tags is none 
         self.observations.initialize(datas, inputs=inputs, masks=masks, tags=tags, init_method=init_method, **observations_mstep_kwargs)
+        # else
+        #self.observations.initialize(datas, inputs=inputs, masks=masks, tags=tags, init_method=init_method)
 
     def permute(self, perm):
         """
@@ -204,7 +223,7 @@ class HMM(object):
         if input is not None:
             assert input.shape == (T,) + M
 
-## MODIFIED THIS LINE BELOW TO INCLUDE NEW CLASS "InputDrivenGaussianObservations" & "InputDrivenDiagonalGaussianObservations"
+        ## MODIFIED THIS LINE BELOW TO INCLUDE "InputDrivenGaussianObservations" & "InputDrivenDiagonalGaussianObservations"
             
         # Get the type of the observations
         if isinstance(self.observations, obs.InputDrivenObservations):
@@ -214,7 +233,10 @@ class HMM(object):
         elif isinstance(self.observations, obs.InputDrivenDiagonalGaussianObservations):
             dtype =  float
         else:
-            dummy_data = self.observations.sample_x(0, np.empty(0, ) + D)
+            if input is None:
+                dummy_data = self.observations.sample_x(0, np.empty(0, ) + D)
+            else:
+                dummy_data = self.observations.sample_x(0, np.empty(0, ) + D, input=input[0])
             dtype = dummy_data.dtype
 
         # fit the data array
@@ -268,6 +290,17 @@ class HMM(object):
         log_likes = self.observations.log_likelihoods(data, input, mask, tag)
         return hmm_expected_states(pi0, Ps, log_likes)
 
+    @ensure_args_not_none
+    def expected_states_full_joints(self, data, input=None, mask=None, tag=None):
+        '''
+        Use when you have stationary transitions but want full joints E[z_t, z_{t+1}] for t = 1,...,T-1
+        Joints are needed if you just want to run the transition matrix m-step for a subset of data
+        '''
+        pi0 = self.init_state_distn.initial_state_distn
+        Ps = self.transitions.transition_matrices(data, input, mask, tag)
+        log_likes = self.observations.log_likelihoods(data, input, mask, tag)
+        return hmm_expected_states_full_joints(pi0, Ps, log_likes)
+    
     @ensure_args_not_none
     def most_likely_states(self, data, input=None, mask=None, tag=None):
         pi0 = self.init_state_distn.initial_state_distn
