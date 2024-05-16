@@ -81,10 +81,6 @@ class HMM(object):
         observation_classes = dict(
             gaussian=obs.GaussianObservations,
             diagonal_gaussian=obs.DiagonalGaussianObservations,
-            diagonal_gaussian_optimizer=obs.DiagonalGaussianObservations_Optimizer,
-            diagonal_gaussian_one_sig_per_state=obs.DiagonalGaussianObservations_OneSigPerState,
-            diagonal_gaussian_one_sig_per_state_optimizer=obs.DiagonalGaussianObservations_OneSigPerState_Optimizer,
-            spherical_gaussian_tied_cov=obs.SphericalGaussianObservations_TiedCovariance,
             studentst=obs.MultivariateStudentsTObservations,
             t=obs.MultivariateStudentsTObservations,
             diagonal_t=obs.StudentsTObservations,
