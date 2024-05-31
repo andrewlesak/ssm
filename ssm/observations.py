@@ -1575,6 +1575,281 @@ class InputDrivenTiedSphericalGaussianObservations_ConstantMusSymmetricWeights(O
         return np.sum(expectations[:, :, None] * mean_out, axis=1)
 
 
+
+class DualTimeSeriesInputDrivenTiedSphericalGaussianObservations_ConstantMusSymmetricWeights(Observations):
+    """
+    Predicts $\vec{x}_t^{(0)} = W_k \vec{u}_t^{(0)} + b_k \vec{1} + \epsilon$ and 
+    $\vec{x}_t^{(1)} = W_k \vec{u}_t^{(1)} + b_k \vec{1} + \epsilon$ using shared params and the same noise model
+    $\epsilon \sim \mathcal{N}(0,\Sigma_k)$ where $\Sigma_k = \sigma \mathbb{I}$ for all k = 1,...,K.
+
+    We assume the observation $\vec{x}_t^{(0)}$ and $\vec{x}_t^{(1)}$ are independent from eachother given
+    the inputs and shared model parrameters. That is:
+
+    $p(\vec{x}_t^{(0)},\vec{x}_t^{(1)}|\vec{u}_t^{(0)},\vec{u}_t^{(1)},\phi_k) = p(\vec{x}_t^{(0)}|\vec{u}_t^{(0)},\phi_k)*p(\vec{x}_t^{(1)}|\vec{u}_t^{(1)},\phi_k)
+
+    Where $p(\vec{x}_t^{(i)}|\vec{u}_t^{(i)},\phi_k) = \mathcal{N}(\vec{x}_t^{(i)} | W_k \vec{u}_t^{(i)} + b_k \vec{1}, \sigma \mathbb{I})
+
+    The observations $\vec{x}_t^{(i)}$ and inputs $\vec{u}_t^{(i)}$ for i = 0,1 have the same dimension
+    and are fed into the model as the column stacked time series $\vec{x}_t = (\vec{x}_t^{(0)}, \vec{x}_t^{(1)})^\top$
+    and $\vec{u}_t = (\vec{u}_t^{(0)}, \vec{u}_t^{(1)})^\top$. Since the input and observation dims are 
+    the same in this symmetric weights model, then our stacked input and observation matrix dimensions are (T, 2D).
+    """
+
+    def __init__(self, K, D, M=0):
+        """
+        @param K: number of states
+        @param D: dimensionality of output
+        @param M: dimensionality of input
+        """
+        super(DualTimeSeriesInputDrivenTiedSphericalGaussianObservations_ConstantMusSymmetricWeights, self).__init__(K, D, M)
+        assert M==D  # input dim must equal observation dim for symmetric weights
+        assert D>=2  # ensure we have at least 2 one-dimensional input & output time series 
+        self.D = D #int(D/2)
+        self.M = M #int(M/2)
+        self.K = K
+        self.mus = npr.randn(self.K, 1)
+        self._log_sigmasq = -2 + npr.randn(1, 1)
+        self.Wks = npr.randn(self.K, self.D, self.M)
+
+    # allow to set parameters by hand
+    @property
+    def Wk(self):
+        return self.Wks
+    @Wk.setter
+    def Wk(self, value):
+        assert value.shape == self.Wks.shape
+        self.Wks = value
+
+    @property
+    def mu(self):
+        return self.mus
+    @mu.setter
+    def mu(self, value):
+        # if mus are array of shape (K,) expand dims to be (K, 1)
+        if value.ndim == 1 and value.shape == (self.K,): 
+            value = np.expand_dims(value, axis=1)
+        assert value.shape == self.mus.shape
+        self.mus = value
+
+    @property
+    def sigmasq(self):
+        return np.exp(self._log_sigmasq)
+    @sigmasq.setter
+    def sigmasq(self, value):
+        # if sigs are array of shape (1,) expand dims to be (1, 1)
+        if value.ndim == 1 and value.shape == (1,): 
+            value = np.expand_dims(value, axis=1)
+        assert np.all(value > 0) and value.shape == (1, 1)
+        self._log_sigmasq = np.log(value)
+    
+    @property
+    def params(self):
+        return self.Wks, self.mus, self._log_sigmasq
+    @params.setter
+    def params(self, value):
+        self.Wks, self.mus, self._log_sigmasq = value
+        
+    def permute(self, perm):
+        self.Wks = self.Wks[perm]
+        self.mus = self.mus[perm]
+        # no need to permute self._log_sigmasq since there is a single tied covariance for all states
+    
+
+    def split_input_output(self, data, input):
+        '''
+        Two time series are stacked along axis=1 for inputs and outputs. 
+        Returns inputs $\vec{u}_t^{(i)}$ and outputs $\vec{x}_t^{(i)}$ for i=0,1.
+        '''
+        # split observations/outputs
+        data_0 = data[:, :self.D]
+        data_1 = data[:, self.D:]
+        # split inputs
+        input_0 = input[:, :self.M]
+        input_1 = input[:, self.M:]  
+        return data_0, data_1, input_0, input_1    
+
+
+    def log_likelihoods(self, data, input, mask, tag):
+        '''
+        Calculate log likelihoods for Gaussian pdf with spherical covariance
+        '''
+        # get mus and sigmas
+        mus = self.mus                              # shape: (K,1)
+        sigmas = np.exp(self._log_sigmasq) + 1e-12  # shape: (1,1)
+        # expand dims for diagonal gaussian pdf
+        mus = mus * np.ones(self.D)                 # shape: (K,D)
+        sigmas = sigmas * np.ones((self.K,self.D))  # shape: (K,D)
+        
+        # get mask (not actually implemented)
+        mask = np.ones_like(data, dtype=bool) if mask is None else mask
+        
+        # get both sets of inputs and outputs
+        data_0, data_1, input_0, input_1 = self.split_input_output(data, input)
+
+        # get weights*inputs for each t
+        Wxu0s = np.transpose(np.dot(self.Wks, input_0.T), (2, 0, 1)) # shape: (T,K,D)
+        Wxu1s = np.transpose(np.dot(self.Wks, input_1.T), (2, 0, 1)) # shape: (T,K,D)
+        
+        # get log-likelihoods for each set of input/outputs
+        diag_gauss_logpdf_0 = stats.diagonal_gaussian_logpdf(data_0[:, None, :] - Wxu0s, mus, sigmas, mask=None)
+        diag_gauss_logpdf_1 = stats.diagonal_gaussian_logpdf(data_1[:, None, :] - Wxu1s, mus, sigmas, mask=None)
+        return diag_gauss_logpdf_0 + diag_gauss_logpdf_1
+
+
+    def sample_x(self, z, xhist, input, tag=None, with_noise=True):
+        '''
+        sample observations from latent state sequnce z. 
+        z is an array of state indices of shape (T,).
+        '''
+        # if z is single value, expand dims to be (1,)
+        sample_one_step = False
+        if np.array(z).ndim == 0:
+            sample_one_step = True
+            z = np.array([z])
+            input = np.expand_dims(input, axis=0)            
+        
+        assert input.shape[1] == self.D # input and output must have same dimension
+
+        # get both sets of inputs
+        input_0, input_1 = input[:, :self.M], input[:, self.M:]
+        # get weights*inputs for each t and set of inputs
+        T = input.shape[0]
+        Wxu0s = np.transpose(np.dot(self.Wks, input_0.T), (2, 0, 1)) # shape: (T,K,D)
+        Wxu0s = Wxu0s[np.arange(T), z, :] # shape: (T,D)
+
+        Wxu1s = np.transpose(np.dot(self.Wks, input_1.T), (2, 0, 1)) # shape: (T,K,D)
+        Wxu1s = Wxu1s[np.arange(T), z, :] # shape: (T,D)
+
+        # get mus and sigmas
+        mus = self.mus  # shape: (K,1)  
+        sigmas = np.exp(self._log_sigmasq) if with_noise else np.zeros((1,1))  # shape: (1,1)
+        # get output  
+        out_0 = Wxu0s + mus[z] + np.sqrt(sigmas[0]) * npr.randn(self.D)
+        out_1 = Wxu1s + mus[z] + np.sqrt(sigmas[0]) * npr.randn(self.D)
+        out = out_0 + out_1
+
+        if sample_one_step: return out[0]
+        else:               return out
+
+    
+    def _get_sufficient_statistics(self, expectations, datas, inputs):
+        """
+        Calculate sufficient statistics needed to run m-step.
+        Naming convention: E = expectation, x = observations, u = inputs, w = gammas (posteriors), T = transpose
+        """
+        K, D, M = self.K, self.D, self.M
+
+        # Initialize the outputs
+        Eu0u0Ts = np.zeros((K,M,M))
+        Eu1u1Ts = np.zeros((K,M,M))
+        Eu0x0Ts = np.zeros((K,M,D))
+        Eu1x1Ts = np.zeros((K,M,D))
+        Ex0s = np.zeros((K,D))
+        Ex1s = np.zeros((K,D))
+        Eu0s = np.zeros((K,M))
+        Eu1s = np.zeros((K,M))
+        Ews = np.zeros(K)
+
+        for (Ez, _, _), x, u in zip(expectations, datas, inputs):
+            x0, x1, u0, u1 = self.split_input_output(x, u)
+            for k in range(K):
+                w = Ez[:, k]
+                Eu0u0Ts[k] += np.einsum('t,ti,tj->ij', w, u0, u0)
+                Eu1u1Ts[k] += np.einsum('t,ti,tj->ij', w, u1, u1)
+                Eu0x0Ts[k] += np.einsum('t,ti,tj->ij', w, u0, x0)
+                Eu1x1Ts[k] += np.einsum('t,ti,tj->ij', w, u1, x1)
+                Ex0s[k] += np.einsum('t,ti->i', w, x0)
+                Ex1s[k] += np.einsum('t,ti->i', w, x1)
+                Eu0s[k] += np.einsum('t,ti->i', w, u0)
+                Eu1s[k] += np.einsum('t,ti->i', w, u1)
+                Ews[k] += np.sum(w)
+        return Eu0u0Ts, Eu1u1Ts, Eu0x0Ts, Eu1x1Ts, Ex0s, Ex1s, Eu0s, Eu1s, Ews
+
+
+    def m_step(self, expectations, datas, inputs, masks, tags, **kwargs):
+        # check which params to update (default to True if not in kwargs)
+        fit_Wks = kwargs.get('fit_Wks', True)
+        fit_mus = kwargs.get('fit_mus', True)
+        fit_vars = kwargs.get('fit_vars', True)
+        if 'run_obs_mstep' in kwargs: run_obs_mstep = kwargs.pop('run_obs_mstep')
+        else: run_obs_mstep = any([fit_Wks, fit_mus, fit_vars])
+
+        if run_obs_mstep:
+            # get num states, obs/input dim
+            K, D, M = self.K, self.D, self.M
+
+            # Collect sufficient statistics
+            Eu0u0Ts, Eu1u1Ts, Eu0x0Ts, Eu1x1Ts, Ex0s, Ex1s, Eu0s, Eu1s, Ews = self._get_sufficient_statistics(expectations, datas, inputs)
+
+            # Solve linear regression for weights
+            for (Ez, _, _), x, u in zip(expectations, datas, inputs):
+                # split inputs/outputs
+                x0, x1, u0, u1 = self.split_input_output(x, u)
+
+                for k in range(K):
+                    # joint maximization of weights and biases
+                    if fit_Wks and fit_mus: 
+                        J = np.ones((D,D))
+                        # calculate A
+                        P = Eu0u0Ts[k] + Eu1u1Ts[k]
+                        Q = 1/(2*D*Ews[k]) * (np.outer(Eu0s[k],Eu0s[k]) + np.outer(Eu0s[k],Eu1s[k]) + np.outer(Eu1s[k],Eu0s[k]) + np.outer(Eu1s[k],Eu1s[k]))
+                        A = np.kron(P,np.eye(D)) + np.kron(np.eye(D),P) - np.kron(Q,J) - np.kron(J,Q)
+                        # calculate B
+                        C = 1/(2*D*Ews[k]) * (np.outer(Ex0s[k],Eu0s[k]) + np.outer(Ex1s[k],Eu0s[k]) + np.outer(Ex0s[k],Eu1s[k]) + np.outer(Ex1s[k],Eu1s[k]))
+                        F = Eu0x0Ts[k] + Eu0x0Ts[k].T + Eu1x1Ts[k] + Eu1x1Ts[k].T
+                        B = F - J @ C - C.T @ J
+                        # solve for vectorized symmetric weight matrix
+                        vec_Wk = scipy.linalg.solve(A, np.ndarray.flatten(B,'F'), assume_a='sym') # solve knowing that A is symmetric
+                        self.Wks[k] = np.reshape(vec_Wk, newshape=(D,M), order='F')
+
+                        # solve for biases
+                        self.mus[k] = 1/(2*D*Ews[k]) * np.sum(Ex0s[k] - self.Wks[k] @ Eu0s[k] + Ex1s[k] - self.Wks[k] @ Eu1s[k]) 
+
+                    # maximization of weights with fixed biases
+                    elif fit_Wks and ~fit_mus: 
+                        J = np.ones((D,D))
+                        # calculate A
+                        A = np.kron(Eu0u0Ts[k],np.eye(D)) + np.kron(np.eye(D),Eu0u0Ts[k]) + np.kron(Eu1u1Ts[k],np.eye(D)) + np.kron(np.eye(D),Eu1u1Ts[k])
+                        # calculate B
+                        F = Eu0x0Ts[k] + Eu0x0Ts[k].T + Eu1x1Ts[k] + Eu1x1Ts[k].T
+                        C = self.mus[k] * (np.outer(np.ones(D), Eu0s[k] + Eu1s[k]) + np.outer(Eu0s[k] + Eu1s[k], np.ones(D)))
+                        B = F - C
+                        # solve for vectorized symmetric weight matrix
+                        vec_Wk = scipy.linalg.solve(A, np.ndarray.flatten(B,'F'), assume_a='sym') # solve knowing that A is symmetric
+                        self.Wks[k] = np.reshape(vec_Wk, newshape=(D,M), order='F')
+                    
+                    # maximization of biases with fixed weights
+                    elif ~fit_Wks and fit_mus: 
+                        # solve for biases
+                        self.mus[k] = 1/(2*D*Ews[k]) * np.sum(Ex0s[k] - self.Wks[k] @ Eu0s[k] + Ex1s[k] - self.Wks[k] @ Eu1s[k]) 
+
+                # maximization of spherical covariance tied across states
+                if fit_vars:
+                    Ts = Ez.shape[0] # num samples
+                    wsqerr_k = [Ez[:, k] * np.sum((x0 - np.einsum('ij,kj->ki',self.Wks[k],u0) - self.mus[k])**2 + (x1 - np.einsum('ij,kj->ki',self.Wks[k],u1) - self.mus[k])**2, axis=1) for k in range(K)]  # sum along dim D, get out shape (K,T)
+                    sum_wsqerr = np.sum(wsqerr_k) + 1e-12  # sum along state & time axes to get single value, add small offset for numerical stability
+                    self._log_sigmasq = np.reshape(np.log(sum_wsqerr / (2*D*Ts)),(-1,1))  # shape: (1,1)
+
+
+    def smooth(self, expectations, data, input, tag):
+        """
+        Compute the mean observation under the posterior distribution
+        of latent discrete states. "expectations" is shape (T,K).
+        """
+        if input.ndim == 1 and input.shape == (expectations.shape[0],): 
+            input = np.expand_dims(input, axis=1)
+        
+        # get both sets of inputs
+        input_0, input_1 = input[:, :self.M], input[:, self.M:]
+        # get outs
+        mean_out_0 = self.mus + np.transpose(np.dot(self.Wks, input_0.T), (2, 0, 1)) # shape: (T,K,D)
+        mean_out_1 = self.mus + np.transpose(np.dot(self.Wks, input_1.T), (2, 0, 1)) # shape: (T,K,D)
+        exp_out_0 = np.sum(expectations[:, :, None] * mean_out_0, axis=1)
+        exp_out_1 = np.sum(expectations[:, :, None] * mean_out_1, axis=1)
+        return np.column_stack((exp_out_0,exp_out_1))
+
+
+
 class _AutoRegressiveObservationsBase(Observations):
     """
     Base class for autoregressive observations of the form,
