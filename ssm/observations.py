@@ -1586,7 +1586,6 @@ class InputDrivenTiedSphericalGaussianObservations_ConstantMusSymmToeplitzWeight
         """
         super(InputDrivenTiedSphericalGaussianObservations_ConstantMusSymmToeplitzWeights, self).__init__(K, D, M)
         assert M==D  # input dim must equal observation dim for symmetric weights
-        assert D>=2  # ensure we have at least 2 one-dimensional input & output time series 
         self.D = D
         self.M = M
         self.K = K
@@ -1637,20 +1636,6 @@ class InputDrivenTiedSphericalGaussianObservations_ConstantMusSymmToeplitzWeight
         self.wk_half_row = self.wk_half_row[perm]
         self.mus = self.mus[perm]
         # no need to permute self._log_sigmasq since there is a single tied covariance for all states
-    
-
-    def split_input_output(self, data, input):
-        '''
-        Two time series are stacked along axis=1 for inputs and outputs. 
-        Returns inputs $\vec{u}_t^{(i)}$ and outputs $\vec{x}_t^{(i)}$ for i=0,1.
-        '''
-        # split observations/outputs
-        data_0 = data[:, :self.D]
-        data_1 = data[:, self.D:]
-        # split inputs
-        input_0 = input[:, :self.M]
-        input_1 = input[:, self.M:]  
-        return data_0, data_1, input_0, input_1    
 
 
     def get_Wks(self):
@@ -1689,7 +1674,7 @@ class InputDrivenTiedSphericalGaussianObservations_ConstantMusSymmToeplitzWeight
         Wks = self.get_Wks()
 
         # get weights*inputs for each t
-        Wxus = np.transpose(np.dot(self.Wks, input.T), (2, 0, 1)) # shape: (T,K,D)
+        Wxus = np.transpose(np.dot(Wks, input.T), (2, 0, 1)) # shape: (T,K,D)
         
         return stats.diagonal_gaussian_logpdf(data[:, None, :] - Wxus, mus, sigmas, mask=None)
 
@@ -1706,23 +1691,19 @@ class InputDrivenTiedSphericalGaussianObservations_ConstantMusSymmToeplitzWeight
             z = np.array([z])
             input = np.expand_dims(input, axis=0)            
         
-        # get both sets of inputs
-        input_0, input_1 = input[:, :self.M], input[:, self.M:]
-        # get weights*inputs for each t and set of inputs
+        # if input is one-dimensional array of size (T,), expand dims to be (T,1)
+        if input.ndim == 1 and input.shape == (z.shape[0],): 
+            input = np.expand_dims(input, axis=1)
+        assert input.shape[1] == self.D # input and output must have same dimension
+    
         T = input.shape[0]
-        Wxu0s = np.transpose(np.dot(self.Wks, input_0.T), (2, 0, 1)) # shape: (T,K,D)
-        Wxu0s = Wxu0s[np.arange(T), z, :] # shape: (T,D)
-
-        Wxu1s = np.transpose(np.dot(self.Wks, input_1.T), (2, 0, 1)) # shape: (T,K,D)
-        Wxu1s = Wxu1s[np.arange(T), z, :] # shape: (T,D)
-
+        # get weights*inputs for each t
+        Wxus = np.transpose(np.dot(self.get_Wks(), input.T), (2, 0, 1)) # shape: (T,K,D)
+        Wxus = Wxus[np.arange(T), z, :] # shape: (T,D)
         # get mus and sigmas
         mus = self.mus  # shape: (K,1)  
-        sigmas = np.exp(self._log_sigmasq) if with_noise else np.zeros((1,1))  # shape: (1,1)
-        # get output  
-        out_0 = Wxu0s + mus[z] + np.sqrt(sigmas[0]) * npr.randn(self.D)
-        out_1 = Wxu1s + mus[z] + np.sqrt(sigmas[0]) * npr.randn(self.D)
-        out = out_0 + out_1
+        sigmas = np.exp(self._log_sigmasq) if with_noise else np.zeros((1,1))  # shape: (1,1)  
+        out = Wxus + mus[z] + np.sqrt(sigmas[0]) * npr.randn(self.D)
 
         if sample_one_step: return out[0]
         else:               return out
@@ -1797,16 +1778,8 @@ class InputDrivenTiedSphericalGaussianObservations_ConstantMusSymmToeplitzWeight
         """
         if input.ndim == 1 and input.shape == (expectations.shape[0],): 
             input = np.expand_dims(input, axis=1)
-        
-        # get both sets of inputs
-        input_0, input_1 = input[:, :self.M], input[:, self.M:]
-        # get outs
-        Wks = self.get_Wks()
-        mean_out_0 = self.mus + np.transpose(np.dot(Wks, input_0.T), (2, 0, 1)) # shape: (T,K,D)
-        mean_out_1 = self.mus + np.transpose(np.dot(Wks, input_1.T), (2, 0, 1)) # shape: (T,K,D)
-        exp_out_0 = np.sum(expectations[:, :, None] * mean_out_0, axis=1)
-        exp_out_1 = np.sum(expectations[:, :, None] * mean_out_1, axis=1)
-        return np.column_stack((exp_out_0,exp_out_1))
+        mean_out = self.mus + np.transpose(np.dot(self.get_Wks(), input.T), (2, 0, 1)) # shape: (T,K,D)
+        return np.sum(expectations[:, :, None] * mean_out, axis=1)
 
 
 
