@@ -1370,6 +1370,209 @@ class InputDrivenTiedSphericalGaussianObservations_ConstantMus(Observations):
 
 
 
+class InputDrivenTiedSphericalGaussianObservations_ConstantMusToeplitzWeights(Observations):
+    def __init__(self, K, D, M=0):
+        """
+        @param K: number of states
+        @param D: dimensionality of output
+        @param M: dimensionality of input
+        """
+        super(InputDrivenTiedSphericalGaussianObservations_ConstantMusToeplitzWeights, self).__init__(K, D, M)
+        assert M==D  # input dim must equal observation dim for square toeplitz matrix
+        self.D = D
+        self.M = M
+        self.K = K
+        self.mus = npr.randn(self.K, 1)
+        self._log_sigmasq = -2 + npr.randn(1, 1)
+        self.wk_rows = npr.randn(K, 2*D-1) # single row used to construct toeplitz
+
+    # allow to set parameters by hand
+    @property
+    def Wk(self):
+        return self.wk_rows
+    @Wk.setter
+    def Wk(self, value):
+        assert value.shape == self.wk_rows.shape
+        self.wk_rows = value
+        
+    @property
+    def mu(self):
+        return self.mus
+    @mu.setter
+    def mu(self, value):
+        # if mus are array of shape (K,) expand dims to be (K, 1)
+        if value.ndim == 1 and value.shape == (self.K,): 
+            value = np.expand_dims(value, axis=1)
+        assert value.shape == self.mus.shape
+        self.mus = value
+
+    @property
+    def sigmasq(self):
+        return np.exp(self._log_sigmasq)
+    @sigmasq.setter
+    def sigmasq(self, value):
+        # if sigs are array of shape (1,) expand dims to be (1, 1)
+        if value.ndim == 1 and value.shape == (1,): 
+            value = np.expand_dims(value, axis=1)
+        assert np.all(value > 0) and value.shape == (1, 1)
+        self._log_sigmasq = np.log(value)
+    
+    @property
+    def params(self):
+        return self.wk_rows, self.mus, self._log_sigmasq
+    @params.setter
+    def params(self, value):
+        self.wk_rows, self.mus, self._log_sigmasq = value
+        
+    def permute(self, perm):
+        self.wk_rows = self.wk_rows[perm]
+        self.mus = self.mus[perm]
+        # no need to permute self._log_sigmasq since there is a single tied covariance for all states
+
+
+    def get_Wks(self):
+        D = self.D
+        K = self.K
+        wk_rows = self.wk_rows
+
+        # get toeplitz with autograd array constraints (only use indexing, slicing, explicit array creation)
+        # matrix constructed from top row down
+        rows = [[] for _ in range(K)]
+        for k in range(K):
+            for i in range(D):
+                if i==0: rows[k].append(wk_rows[k,(D-1):])
+                else:    rows[k].append(wk_rows[k,(D-1) - i: -i])
+        Wks = np.array(rows)
+        return Wks
+    
+
+    def log_likelihoods(self, data, input, mask, tag):
+        '''
+        Calculate log likelihoods for Gaussian pdf with spherical covariance
+        '''
+        # get mus and sigmas
+        mus = self.mus                              # shape: (K,1)
+        sigmas = np.exp(self._log_sigmasq) + 1e-12  # shape: (1,1)
+        # expand dims for diagonal gaussian pdf
+        mus = mus * np.ones(self.D)                 # shape: (K,D)
+        sigmas = sigmas * np.ones((self.K,self.D))  # shape: (K,D)
+        
+        # get mask (not actually implemented)
+        mask = np.ones_like(data, dtype=bool) if mask is None else mask
+        
+        # get weights
+        Wks = self.get_Wks()
+
+        # get weights*inputs for each t
+        Wxus = np.transpose(np.dot(Wks, input.T), (2, 0, 1)) # shape: (T,K,D)
+        
+        return stats.diagonal_gaussian_logpdf(data[:, None, :] - Wxus, mus, sigmas, mask=None)
+
+
+    def sample_x(self, z, xhist, input, tag=None, with_noise=True):
+        '''
+        sample observations from latent state sequnce z. 
+        z is an array of state indices of shape (T,).
+        '''
+        # if z is single value, expand dims to be (1,)
+        sample_one_step = False
+        if np.array(z).ndim == 0:
+            sample_one_step = True
+            z = np.array([z])
+            input = np.expand_dims(input, axis=0)            
+        
+        # if input is one-dimensional array of size (T,), expand dims to be (T,1)
+        if input.ndim == 1 and input.shape == (z.shape[0],): 
+            input = np.expand_dims(input, axis=1)
+        assert input.shape[1] == self.D # input and output must have same dimension
+    
+        T = input.shape[0]
+        # get weights*inputs for each t
+        Wxus = np.transpose(np.dot(self.get_Wks(), input.T), (2, 0, 1)) # shape: (T,K,D)
+        Wxus = Wxus[np.arange(T), z, :] # shape: (T,D)
+        # get mus and sigmas
+        mus = self.mus  # shape: (K,1)  
+        sigmas = np.exp(self._log_sigmasq) if with_noise else np.zeros((1,1))  # shape: (1,1)  
+        out = Wxus + mus[z] + np.sqrt(sigmas[0]) * npr.randn(self.D)
+
+        if sample_one_step: return out[0]
+        else:               return out
+
+    
+    def m_step(self, expectations, datas, inputs, masks, tags, optimizer="lbfgs", **kwargs):
+        # check if regularization param was passed
+        alpha = kwargs.pop("alpha", 0)
+        # check if optimizer was passed 
+        optimizer = kwargs.pop("optimizer", optimizer)
+        # check what params to fit       
+        fit_Wks = kwargs.pop("fit_Wks", True)
+        fit_mus = kwargs.pop("fit_mus", True)
+        fit_vars = kwargs.pop("fit_vars", True)
+        run_obs_mstep = kwargs.pop("run_obs_mstep", any([fit_Wks, fit_mus, fit_vars]))
+
+        if run_obs_mstep:
+            # expected log joint (add prior to elbo if desired)
+            def _expected_log_joint(expectations):
+                elbo = 0  # add prior to elbo if desired
+                for data, input, mask, tag, (expected_states, _, _) in zip(datas, inputs, masks, tags, expectations):
+                    lls = self.log_likelihoods(data, input, mask, tag) 
+                    elbo += np.sum(expected_states * lls)
+                    penalty = 0
+                    if alpha: penalty = alpha * np.sum((self.wk_rows)**2) # penalize large weights 
+                return elbo - penalty 
+
+            # Define optimization target
+            T = sum([data.shape[0] for data in datas])
+            def _objective(params, itr):
+                if fit_Wks:
+                    self.wk_rows = params[0]
+                    params = params[1:]
+                if fit_mus:
+                    self.mus = params[0]
+                    params = params[1:]
+                if fit_vars:
+                    self._log_sigmasq = params[0]
+                
+                obj = _expected_log_joint(expectations)
+                return -obj / T
+
+            # Update parameters
+            wk_rows = self.wk_rows
+            mus = self.mus
+            var = self._log_sigmasq
+
+            # Optimizer call based on the parameters to fit
+            initial_params = []
+            if fit_Wks:  initial_params.append(wk_rows)
+            if fit_mus:  initial_params.append(mus)
+            if fit_vars: initial_params.append(var)
+
+            optimizer = dict(adam=adam, bfgs=bfgs, lbfgs=lbfgs, rmsprop=rmsprop, sgd=sgd)[optimizer]
+            optimized_params = optimizer(_objective, initial_params, **kwargs)
+            
+            idx = 0
+            if fit_Wks:
+                self.wk_rows = optimized_params[idx]
+                idx += 1
+            if fit_mus:
+                self.mus = optimized_params[idx]
+                idx += 1
+            if fit_vars:
+                self._log_sigmasq = optimized_params[idx] 
+
+
+    def smooth(self, expectations, data, input, tag):
+        """
+        Compute the mean observation under the posterior distribution
+        of latent discrete states. "expectations" is shape (T,K).
+        """
+        if input.ndim == 1 and input.shape == (expectations.shape[0],): 
+            input = np.expand_dims(input, axis=1)
+        mean_out = self.mus + np.transpose(np.dot(self.get_Wks(), input.T), (2, 0, 1)) # shape: (T,K,D)
+        return np.sum(expectations[:, :, None] * mean_out, axis=1)
+
+
+
 class InputDrivenTiedSphericalGaussianObservations_ConstantMusSymmetricWeights(Observations):
 
     def __init__(self, K, D, M=0):
