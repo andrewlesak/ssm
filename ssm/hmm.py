@@ -107,6 +107,7 @@ class HMM(object):
             input_driven_obs_diagonal_gaussian=obs.InputDrivenDiagonalGaussianObservations,
             input_driven_tied_spherical_gaussian_obs_const_bias=obs.InputDrivenTiedSphericalGaussianObservations_ConstantMus,
             input_driven_tied_spherical_gaussian_obs_const_bias_symm_weights=obs.InputDrivenTiedSphericalGaussianObservations_ConstantMusSymmetricWeights,
+            input_driven_tied_spherical_gaussian_obs_const_bias_toeplitz_weights=obs.InputDrivenTiedSphericalGaussianObservations_ConstantMusToeplitzWeights,
             input_driven_tied_spherical_gaussian_obs_const_bias_symm_toeplitz_weights=obs.InputDrivenTiedSphericalGaussianObservations_ConstantMusSymmToeplitzWeights,
             dual_input_driven_tied_spherical_gaussian_obs_const_bias_symm_weights=obs.DualTimeSeriesInputDrivenTiedSphericalGaussianObservations_ConstantMusSymmetricWeights,
             dual_input_driven_tied_spherical_gaussian_obs_const_bias_symm_toeplitz_weights=obs.DualTimeSeriesInputDrivenTiedSphericalGaussianObservations_ConstantMusSymmToeplitzWeights
